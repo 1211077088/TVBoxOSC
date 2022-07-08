@@ -64,7 +64,7 @@ public class GridFragment extends BaseLazyFragment {
         mGridView.setHasFixedSize(true);
         gridAdapter = new GridAdapter();
         mGridView.setAdapter(gridAdapter);
-        mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, 5));
+        mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, isBaseOnWidth() ? 5 : 6));
         gridAdapter.setOnLoadMoreListener(new BaseQuickAdapter.RequestLoadMoreListener() {
             @Override
             public void onLoadMoreRequested() {
@@ -163,7 +163,7 @@ public class GridFragment extends BaseLazyFragment {
 
     public void showFilter() {
         if (!sortData.filters.isEmpty() && gridFilterDialog == null) {
-            gridFilterDialog = new GridFilterDialog().build(mContext);
+            gridFilterDialog = new GridFilterDialog(mContext);
             gridFilterDialog.setData(sortData);
             gridFilterDialog.setOnDismiss(new GridFilterDialog.Callback() {
                 @Override

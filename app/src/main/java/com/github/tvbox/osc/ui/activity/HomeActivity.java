@@ -6,8 +6,6 @@ import android.animation.AnimatorSet;
 import android.animation.IntEvaluator;
 import android.animation.ObjectAnimator;
 import android.annotation.SuppressLint;
-import android.app.AlertDialog;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
@@ -34,6 +32,7 @@ import com.github.tvbox.osc.event.RefreshEvent;
 import com.github.tvbox.osc.server.ControlManager;
 import com.github.tvbox.osc.ui.adapter.HomePageAdapter;
 import com.github.tvbox.osc.ui.adapter.SortAdapter;
+import com.github.tvbox.osc.ui.dialog.TipDialog;
 import com.github.tvbox.osc.ui.fragment.GridFragment;
 import com.github.tvbox.osc.ui.fragment.UserFragment;
 import com.github.tvbox.osc.ui.tv.widget.DefaultTransformer;
@@ -42,8 +41,10 @@ import com.github.tvbox.osc.ui.tv.widget.NoScrollViewPager;
 import com.github.tvbox.osc.ui.tv.widget.ViewObj;
 import com.github.tvbox.osc.util.AppManager;
 import com.github.tvbox.osc.util.DefaultConfig;
+import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.LOG;
 import com.github.tvbox.osc.viewmodel.SourceViewModel;
+import com.orhanobut.hawk.Hawk;
 import com.owen.tvrecyclerview.widget.TvRecyclerView;
 import com.owen.tvrecyclerview.widget.V7LinearLayoutManager;
 
@@ -155,7 +156,7 @@ public class HomeActivity extends BaseActivity {
                 if (itemView != null && currentSelected == position && !sortAdapter.getItem(position).filters.isEmpty()) { // 弹出筛选
                     BaseLazyFragment baseLazyFragment = fragments.get(currentSelected);
                     if ((baseLazyFragment instanceof GridFragment)) {
-                        ((GridFragment)baseLazyFragment).showFilter();
+                        ((GridFragment) baseLazyFragment).showFilter();
                     }
                 }
             }
@@ -178,17 +179,6 @@ public class HomeActivity extends BaseActivity {
         });
         setLoadSir(this.contentLayout);
         //mHandler.postDelayed(mFindFocus, 500);
-        /*
-        if (!Hawk.contains("update_hint_v14")) {
-            UpdateHintDialog updateHintDialog = new UpdateHintDialog().OnSureListener(new UpdateHintDialog.OnSureListener() {
-                @Override
-                public void sure() {
-                    Hawk.put("update_hint_v14", true);
-                }
-            }).build(this);
-            updateHintDialog.show();
-        }
-        */
     }
 
     private void initViewModel() {
@@ -197,12 +187,12 @@ public class HomeActivity extends BaseActivity {
             @Override
             public void onChanged(AbsSortXml absXml) {
                 showSuccess();
-                if (absXml != null && absXml.movieSort != null && absXml.movieSort.sortList != null) {
-                    sortAdapter.setNewData(DefaultConfig.adjustSort(ApiConfig.get().getHomeSourceBean().getKey(), absXml.movieSort.sortList, true));
+                if (absXml != null && absXml.classes != null && absXml.classes.sortList != null) {
+                    sortAdapter.setNewData(DefaultConfig.adjustSort(ApiConfig.get().getHomeSourceBean().getKey(), absXml.classes.sortList, true));
                 } else {
                     sortAdapter.setNewData(DefaultConfig.adjustSort(ApiConfig.get().getHomeSourceBean().getKey(), new ArrayList<>(), true));
                 }
-                initViewPager();
+                initViewPager(absXml);
             }
         });
     }
@@ -259,7 +249,7 @@ public class HomeActivity extends BaseActivity {
             return;
         }
         ApiConfig.get().loadConfig(useCacheConfig, new ApiConfig.LoadConfigCallback() {
-            AlertDialog dialog = null;
+            TipDialog dialog = null;
 
             @Override
             public void retry() {
@@ -302,34 +292,44 @@ public class HomeActivity extends BaseActivity {
                     @Override
                     public void run() {
                         if (dialog == null)
-                            dialog = new AlertDialog.Builder(HomeActivity.this).setTitle("提示")
-                                    .setMessage(msg + "\n\n请重试!")
-                                    .setPositiveButton("确定", new DialogInterface.OnClickListener() {
+                            dialog = new TipDialog(HomeActivity.this, msg, "重试", "取消", new TipDialog.OnListener() {
+                                @Override
+                                public void left() {
+                                    mHandler.post(new Runnable() {
                                         @Override
-                                        public void onClick(DialogInterface dialogInterface, int i) {
-                                            mHandler.post(new Runnable() {
-                                                @Override
-                                                public void run() {
-                                                    initData();
-                                                }
-                                            });
-                                        }
-                                    })
-                                    .setNegativeButton("取消", new DialogInterface.OnClickListener() {
-                                        @Override
-                                        public void onClick(DialogInterface dialog, int which) {
-                                            dataInitOk = true;
-                                            jarInitOk = true;
+                                        public void run() {
                                             initData();
+                                            dialog.hide();
                                         }
-                                    })
-                                    .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                                    });
+                                }
+
+                                @Override
+                                public void right() {
+                                    dataInitOk = true;
+                                    jarInitOk = true;
+                                    mHandler.post(new Runnable() {
                                         @Override
-                                        public void onCancel(DialogInterface dialog) {
-                                            dataInitOk = true;
-                                            jarInitOk = true;
+                                        public void run() {
+                                            initData();
+                                            dialog.hide();
                                         }
-                                    }).create();
+                                    });
+                                }
+
+                                @Override
+                                public void cancel() {
+                                    dataInitOk = true;
+                                    jarInitOk = true;
+                                    mHandler.post(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            initData();
+                                            dialog.hide();
+                                        }
+                                    });
+                                }
+                            });
                         if (!dialog.isShowing())
                             dialog.show();
                     }
@@ -338,11 +338,15 @@ public class HomeActivity extends BaseActivity {
         }, this);
     }
 
-    private void initViewPager() {
+    private void initViewPager(AbsSortXml absXml) {
         if (sortAdapter.getData().size() > 0) {
             for (MovieSort.SortData data : sortAdapter.getData()) {
                 if (data.id.equals("my0")) {
-                    fragments.add(UserFragment.newInstance());
+                    if (Hawk.get(HawkConfig.HOME_REC, 0) == 1 && absXml != null && absXml.videoList != null && absXml.videoList.size() > 0) {
+                        fragments.add(UserFragment.newInstance(absXml.videoList));
+                    } else {
+                        fragments.add(UserFragment.newInstance(null));
+                    }
                 } else {
                     fragments.add(GridFragment.newInstance(data));
                 }
@@ -408,8 +412,14 @@ public class HomeActivity extends BaseActivity {
 
     @Subscribe(threadMode = ThreadMode.MAIN)
     public void refresh(RefreshEvent event) {
-        if (event.type == RefreshEvent.TYPE_API_URL_CHANGE) {
-            Toast.makeText(mContext, "配置地址设置为" + (String) event.obj + ",重启应用生效!", Toast.LENGTH_SHORT).show();
+        if (event.type == RefreshEvent.TYPE_PUSH_URL) {
+            if (ApiConfig.get().getSource("push_agent") != null) {
+                Intent newIntent = new Intent(mContext, DetailActivity.class);
+                newIntent.putExtra("id", (String) event.obj);
+                newIntent.putExtra("sourceKey", "push_agent");
+                newIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                HomeActivity.this.startActivity(newIntent);
+            }
         }
     }
 

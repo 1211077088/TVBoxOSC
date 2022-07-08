@@ -8,13 +8,11 @@ import android.util.Base64;
 import com.github.catvod.crawler.JarLoader;
 import com.github.catvod.crawler.Spider;
 import com.github.tvbox.osc.base.App;
-import com.github.tvbox.osc.bean.ChannelGroup;
+import com.github.tvbox.osc.bean.LiveChannelGroup;
 import com.github.tvbox.osc.bean.IJKCode;
-import com.github.tvbox.osc.bean.LiveChannel;
+import com.github.tvbox.osc.bean.LiveChannelItem;
 import com.github.tvbox.osc.bean.ParseBean;
 import com.github.tvbox.osc.bean.SourceBean;
-import com.github.tvbox.osc.cache.RoomDataManger;
-import com.github.tvbox.osc.cache.SourceState;
 import com.github.tvbox.osc.server.ControlManager;
 import com.github.tvbox.osc.util.AdBlocker;
 import com.github.tvbox.osc.util.DefaultConfig;
@@ -49,10 +47,10 @@ import java.util.Map;
  */
 public class ApiConfig {
     private static ApiConfig instance;
-    private List<SourceBean> sourceBeanList;
+    private LinkedHashMap<String, SourceBean> sourceBeanList;
     private SourceBean mHomeSource;
     private ParseBean mDefaultParse;
-    private List<ChannelGroup> channelGroupList;
+    private List<LiveChannelGroup> liveChannelGroupList;
     private List<ParseBean> parseBeanList;
     private List<String> vipParseFlags;
     private List<IJKCode> ijkCodes;
@@ -64,8 +62,8 @@ public class ApiConfig {
 
 
     private ApiConfig() {
-        sourceBeanList = new ArrayList<>();
-        channelGroupList = new ArrayList<>();
+        sourceBeanList = new LinkedHashMap<>();
+        liveChannelGroupList = new ArrayList<>();
         parseBeanList = new ArrayList<>();
     }
 
@@ -139,7 +137,7 @@ public class ApiConfig {
                                 th.printStackTrace();
                             }
                         }
-                        callback.error("拉取配置失败");
+                        callback.error("拉取配置失败\n" + (response.getException() != null ? response.getException().getMessage() : ""));
                     }
 
                     public String convertResponse(okhttp3.Response response) throws Throwable {
@@ -203,6 +201,12 @@ public class ApiConfig {
                     callback.error("");
                 }
             }
+
+            @Override
+            public void onError(Response<File> response) {
+                super.onError(response);
+                callback.error("");
+            }
         });
     }
 
@@ -223,32 +227,32 @@ public class ApiConfig {
         // spider
         spider = DefaultConfig.safeJsonString(infoJson, "spider", "");
         // 远端站点源
+        SourceBean firstSite = null;
         for (JsonElement opt : infoJson.get("sites").getAsJsonArray()) {
             JsonObject obj = (JsonObject) opt;
             SourceBean sb = new SourceBean();
-            sb.setKey(obj.get("key").getAsString().trim());
+            String siteKey = obj.get("key").getAsString().trim();
+            sb.setKey(siteKey);
             sb.setName(obj.get("name").getAsString().trim());
             sb.setType(obj.get("type").getAsInt());
             sb.setApi(obj.get("api").getAsString().trim());
             sb.setSearchable(DefaultConfig.safeJsonInt(obj, "searchable", 1));
-            sb.setSearchable(DefaultConfig.safeJsonInt(obj, "quickSearch", 1));
+            sb.setQuickSearch(DefaultConfig.safeJsonInt(obj, "quickSearch", 1));
             sb.setFilterable(DefaultConfig.safeJsonInt(obj, "filterable", 1));
             sb.setPlayerUrl(DefaultConfig.safeJsonString(obj, "playUrl", ""));
             sb.setExt(DefaultConfig.safeJsonString(obj, "ext", ""));
-            sourceBeanList.add(sb);
+            sb.setCategories(DefaultConfig.safeJsonStringList(obj, "categories"));
+            if (firstSite == null)
+                firstSite = sb;
+            sourceBeanList.put(siteKey, sb);
         }
         if (sourceBeanList != null && sourceBeanList.size() > 0) {
-            // 获取启用状态
-            HashMap<String, SourceState> sourceStates = RoomDataManger.getAllSourceState();
-            for (SourceBean sb : sourceBeanList) {
-                if (sourceStates.containsKey(sb.getKey()))
-                    sb.setState(sourceStates.get(sb.getKey()));
-                if (sb.isHome())
-                    setSourceBean(sb);
-            }
-            // 如果没有home source 使用第一个
-            if (mHomeSource == null)
-                setSourceBean(sourceBeanList.get(0));
+            String home = Hawk.get(HawkConfig.HOME_API, "");
+            SourceBean sh = getSource(home);
+            if (sh == null)
+                setSourceBean(firstSite);
+            else
+                setSourceBean(sh);
         }
         // 需要使用vip解析的flag
         vipParseFlags = DefaultConfig.safeJsonStringList(infoJson, "flags");
@@ -275,6 +279,7 @@ public class ApiConfig {
                 setDefaultParse(parseBeanList.get(0));
         }
         // 直播源
+        liveChannelGroupList.clear();           //修复从后台切换重复加载频道列表
         try {
             String lives = infoJson.get("lives").getAsJsonArray().toString();
             int index = lives.indexOf("proxy://");
@@ -293,9 +298,9 @@ public class ApiConfig {
                         url = url.replace(extUrl, extUrlFix);
                     }
                 }
-                ChannelGroup channelGroup = new ChannelGroup();
-                channelGroup.setGroupName(url);
-                channelGroupList.add(channelGroup);
+                LiveChannelGroup liveChannelGroup = new LiveChannelGroup();
+                liveChannelGroup.setGroupName(url);
+                liveChannelGroupList.add(liveChannelGroup);
             } else {
                 loadLives(infoJson.get("lives").getAsJsonArray());
             }
@@ -338,22 +343,46 @@ public class ApiConfig {
     }
 
     public void loadLives(JsonArray livesArray) {
+        liveChannelGroupList.clear();
         int groupIndex = 0;
         int channelIndex = 0;
+        int channelNum = 0;
         for (JsonElement groupElement : livesArray) {
-            ChannelGroup channelGroup = new ChannelGroup();
-            channelGroup.setGroupNum(groupIndex++);
-            channelGroup.setGroupName(((JsonObject) groupElement).get("Group").getAsString().trim());
+            LiveChannelGroup liveChannelGroup = new LiveChannelGroup();
+            liveChannelGroup.setLiveChannels(new ArrayList<LiveChannelItem>());
+            liveChannelGroup.setGroupIndex(groupIndex++);
+            String groupName = ((JsonObject) groupElement).get("group").getAsString().trim();
+            String[] splitGroupName = groupName.split("_", 2);
+            liveChannelGroup.setGroupName(splitGroupName[0]);
+            if (splitGroupName.length > 1)
+                liveChannelGroup.setGroupPassword(splitGroupName[1]);
+            else
+                liveChannelGroup.setGroupPassword("");
+            channelIndex = 0;
             for (JsonElement channelElement : ((JsonObject) groupElement).get("channels").getAsJsonArray()) {
                 JsonObject obj = (JsonObject) channelElement;
-                LiveChannel liveChannel = new LiveChannel();
-                liveChannel.setChannelName(obj.get("name").getAsString().trim());
-                liveChannel.setChannelNum(channelIndex++);
+                LiveChannelItem liveChannelItem = new LiveChannelItem();
+                liveChannelItem.setChannelName(obj.get("name").getAsString().trim());
+                liveChannelItem.setChannelIndex(channelIndex++);
+                liveChannelItem.setChannelNum(++channelNum);
                 ArrayList<String> urls = DefaultConfig.safeJsonStringList(obj, "urls");
-                liveChannel.setUrls(urls);
-                channelGroup.getLiveChannels().add(liveChannel);
+                ArrayList<String> sourceNames = new ArrayList<>();
+                ArrayList<String> sourceUrls = new ArrayList<>();
+                int sourceIndex = 1;
+                for (String url : urls) {
+                    String[] splitText = url.split("\\$", 2);
+                    sourceUrls.add(splitText[0]);
+                    if (splitText.length > 1)
+                        sourceNames.add(splitText[1]);
+                    else
+                        sourceNames.add("源" + Integer.toString(sourceIndex));
+                    sourceIndex++;
+                }
+                liveChannelItem.setChannelSourceNames(sourceNames);
+                liveChannelItem.setChannelUrls(sourceUrls);
+                liveChannelGroup.getLiveChannels().add(liveChannelItem);
             }
-            channelGroupList.add(channelGroup);
+            liveChannelGroupList.add(liveChannelGroup);
         }
     }
 
@@ -392,18 +421,14 @@ public class ApiConfig {
     }
 
     public SourceBean getSource(String key) {
-        for (SourceBean bean : sourceBeanList) {
-            if (bean.getKey().equals(key))
-                return bean;
-        }
-        return null;
+        if (!sourceBeanList.containsKey(key))
+            return null;
+        return sourceBeanList.get(key);
     }
 
     public void setSourceBean(SourceBean sourceBean) {
-        if (this.mHomeSource != null)
-            this.mHomeSource.setHome(false);
         this.mHomeSource = sourceBean;
-        sourceBean.setHome(true);
+        Hawk.put(HawkConfig.HOME_API, sourceBean.getKey());
     }
 
     public void setDefaultParse(ParseBean parseBean) {
@@ -419,7 +444,7 @@ public class ApiConfig {
     }
 
     public List<SourceBean> getSourceBeanList() {
-        return sourceBeanList;
+        return new ArrayList<>(sourceBeanList.values());
     }
 
     public List<ParseBean> getParseBeanList() {
@@ -434,13 +459,8 @@ public class ApiConfig {
         return mHomeSource == null ? emptyHome : mHomeSource;
     }
 
-    public List<ChannelGroup> getChannelGroupList() {
-        return channelGroupList;
-    }
-
-    public void setChannelGroupList(List<ChannelGroup> list) {
-        channelGroupList.clear();
-        channelGroupList.addAll(list);
+    public List<LiveChannelGroup> getChannelGroupList() {
+        return liveChannelGroupList;
     }
 
     public List<IJKCode> getIjkCodes() {
@@ -449,8 +469,12 @@ public class ApiConfig {
 
     public IJKCode getCurrentIJKCode() {
         String codeName = Hawk.get(HawkConfig.IJK_CODEC, "");
+        return getIJKCodec(codeName);
+    }
+
+    public IJKCode getIJKCodec(String name) {
         for (IJKCode code : ijkCodes) {
-            if (code.getName().equals(codeName))
+            if (code.getName().equals(name))
                 return code;
         }
         return ijkCodes.get(0);
